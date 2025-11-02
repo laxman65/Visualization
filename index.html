@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Interactive B-Tree Visualizer — Insert & Split Demo</title>
+  <style>
+    :root{ --bg:#0f1724; --card:#0b1220; --accent:#60a5fa; --muted:#94a3b8; --light:#e6eef8; }
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#071020 0%, #071229 100%);font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    .app{padding:18px;max-width:1200px;margin:0 auto;color:var(--light)}
+    header{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+    h1{font-size:20px;margin:0}
+    .controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .card{background:rgba(255,255,255,0.03);padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    input[type=number],input[type=text],select{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px;border-radius:8px;color:var(--light);min-width:120px}
+    button{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:#022;cursor:pointer;font-weight:600}
+    .muted{color:var(--muted);font-size:13px}
+    .layout{display:grid;grid-template-columns:1fr 360px;gap:12px;margin-top:14px}
+    #canvasWrap{background:linear-gradient(180deg,#081226 0%, #06121a 100%);min-height:520px;border-radius:10px;padding:12px;overflow:auto}
+    svg{width:100%;height:520px}
+    .log{height:520px;overflow:auto;padding:12px}
+    .node{fill:#071225;stroke:rgba(255,255,255,0.08);rx:8;}
+    .keyRect{fill:rgba(255,255,255,0.02);stroke:rgba(255,255,255,0.06);}
+    .keyText{font-size:13px;fill:var(--light);font-weight:700}
+    .promo{background:linear-gradient(90deg,#f0b1c6, #ffd79a);padding:8px;border-radius:6px}
+    .row{display:flex;gap:8px;align-items:center}
+    .small{font-size:13px}
+    footer{margin-top:12px;color:var(--muted);font-size:13px}
+    .badge{background:rgba(255,255,255,0.04);padding:6px;border-radius:6px}
+    .controls-group{display:flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Interactive B-Tree Visualizer</h1>
+        <div class="muted">Insert keys, watch node splits & promotions — great for DB indexing demos</div>
+      </div>
+    </header>
+
+    <div class="card controls">
+      <div class="controls-group">
+        <label class="muted">Order (t):</label>
+        <select id="orderSelect">
+          <option value="2">2 (min degree)</option>
+          <option value="3" selected>3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+        </select>
+        <span class="muted">Max keys per node = 2*t - 1</span>
+      </div>
+
+      <div style="display:flex;gap:8px;align-items:center;margin-left:20px">
+        <input id="keyInput" type="text" placeholder="Enter keys (comma separated)" />
+        <button id="insertBtn">Insert</button>
+        <button id="stepBtn">Step</button>
+        <button id="autoBtn">Auto Insert</button>
+        <button id="randBtn">Random</button>
+        <button id="clearBtn">Reset</button>
+      </div>
+
+      <div style="margin-top:8px;display:flex;gap:12px;align-items:center">
+        <div class="muted">Animation speed</div>
+        <input id="speed" type="range" min="100" max="1500" value="600" />
+        <div class="muted small">(ms)</div>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div id="canvasWrap" class="card">
+        <svg id="svgRoot" viewBox="0 0 1200 520" preserveAspectRatio="xMidYMin meet"></svg>
+      </div>
+
+      <div class="card log">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="muted">Operation Log</div>
+          <div class="badge small">Root keys: <span id="rootKeys">0</span></div>
+        </div>
+        <div id="logArea" style="font-family:monospace;font-size:13px;color:var(--light)"></div>
+      </div>
+    </div>
+
+    <footer>
+      Tip: use Insert for immediate multiple-key inserts (comma separated). Use Step to go one insertion action at a time and watch splits.
+    </footer>
+  </div>
+
+<script>
+// -------------------- B-Tree Implementation (visualization-friendly) --------------------
+class BTreeNode {
+  constructor(t, leaf=false) {
+    this.t = t;
+    this.keys = []; // sorted keys
+    this.children = []; // child pointers
+    this.leaf = leaf;
+    this.id = BTreeNode._nextId++;
+  }
+}
+BTreeNode._nextId = 1;
+
+class BTree {
+  constructor(t) {
+    this.t = t;
+    this.root = new BTreeNode(t, true);
+    this.log = [];
+  }
+
+  search(k, node = this.root) {
+    let i=0; while(i<node.keys.length && k>node.keys[i]) i++;
+    if(i<node.keys.length && node.keys[i]===k) return {node, idx:i};
+    if(node.leaf) return null;
+    return this.search(k, node.children[i]);
+  }
+
+  insert(k) {
+    if(this.search(k)) { this._addLog(`Key ${k} already exists — skipping`); return null; }
+    const r = this.root;
+    if(r.keys.length === 2*this.t - 1) {
+      const s = new BTreeNode(this.t, false);
+      this.root = s; s.children.push(r);
+      this._addLog(`Root full. Splitting root (id ${r.id}) -> new root (id ${s.id})`);
+      this.splitChild(s,0);
+      this._insertNonFull(s,k);
+      return {action:'split-root',node:r, parent:s};
+    } else {
+      this._insertNonFull(r,k);
+      return {action:'insert',node:r};
+    }
+  }
+
+  _insertNonFull(x,k) {
+    let i = x.keys.length - 1;
+    if(x.leaf) {
+      // insert into leaf
+      while(i>=0 && k < x.keys[i]) i--;
+      x.keys.splice(i+1,0,k);
+      this._addLog(`Inserted ${k} into leaf node id ${x.id}`);
+      return {node:x, pos:i+1};
+    } else {
+      while(i>=0 && k < x.keys[i]) i--;
+      i++;
+      const child = x.children[i];
+      if(child.keys.length === 2*this.t - 1) {
+        this._addLog(`Child id ${child.id} full. Splitting child at index ${i} of node id ${x.id}`);
+        this.splitChild(x,i);
+        if(k > x.keys[i]) i++;
+      }
+      return this._insertNonFull(x.children[i],k);
+    }
+  }
+
+  splitChild(parent, i) {
+    const t = this.t;
+    const y = parent.children[i];
+    const z = new BTreeNode(t, y.leaf);
+    // y has 2t-1 keys. median at t-1
+    const median = y.keys[t-1];
+    // z gets keys t .. 2t-2
+    z.keys = y.keys.slice(t);
+    // y keeps 0 .. t-2
+    y.keys = y.keys.slice(0,t-1);
+    if(!y.leaf) {
+      z.children = y.children.slice(t);
+      y.children = y.children.slice(0,t);
+    }
+    parent.children.splice(i+1,0,z);
+    parent.keys.splice(i,0,median);
+    this._addLog(`Split node id ${y.id}. Promoted ${median} to parent id ${parent.id}. New node id ${z.id}`);
+    return {y,z,median,parent,i};
+  }
+
+  _addLog(msg) { const ts = new Date().toLocaleTimeString(); this.log.unshift(`[${ts}] ${msg}`); }
+}
+
+// -------------------- Visualization --------------------
+const svg = document.getElementById('svgRoot');
+const logArea = document.getElementById('logArea');
+const rootKeysBadge = document.getElementById('rootKeys');
+let tree = new BTree(3);
+let actionQueue = []; // queued visualization actions for step/auto
+let animSpeed = 600;
+
+function render() {
+  svg.innerHTML = '';
+  const layout = computeLayout(tree.root);
+  // draw links
+  layout.forEach(node => {
+    if(!node.data.leaf) {
+      node.data.children.forEach((ch, idx) => {
+        const childNode = layout.find(n=>n.data.id===ch.id);
+        if(childNode) drawLink(node.cx, node.cy+28, childNode.cx, childNode.cy-28);
+      });
+    }
+  });
+  // draw nodes
+  layout.forEach(node => drawNode(node));
+  // update logs
+  logArea.innerHTML = tree.log.join('\n');
+  rootKeysBadge.textContent = tree.root.keys.length;
+}
+
+function drawLink(x1,y1,x2,y2) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+  const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('d',`M ${x1} ${y1} C ${x1} ${(y1+y2)/2} ${x2} ${(y1+y2)/2} ${x2} ${y2}`);
+  path.setAttribute('stroke','rgba(255,255,255,0.06)');
+  path.setAttribute('fill','none');
+  path.setAttribute('stroke-width','2');
+  g.appendChild(path);
+  svg.appendChild(g);
+}
+
+function drawNode(nodeLayout) {
+  const node = nodeLayout.data;
+  const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+  const nx = nodeLayout.cx; const ny = nodeLayout.cy;
+  const keyCount = Math.max(1,node.keys.length);
+  const keyW = 48;
+  const totalW = keyCount * keyW;
+  const left = nx - totalW/2;
+  // node rect background
+  const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+  rect.setAttribute('x', left-6);
+  rect.setAttribute('y', ny-20);
+  rect.setAttribute('width', totalW+12);
+  rect.setAttribute('height', 40);
+  rect.setAttribute('rx',10);
+  rect.setAttribute('class','node');
+  rect.style.fill = 'rgba(255,255,255,0.02)';
+  rect.style.stroke = 'rgba(255,255,255,0.06)';
+  g.appendChild(rect);
+
+  node.keys.forEach((k, i) => {
+    const kr = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    kr.setAttribute('x', left + i*keyW);
+    kr.setAttribute('y', ny-18);
+    kr.setAttribute('width', keyW);
+    kr.setAttribute('height', 36);
+    kr.setAttribute('class','keyRect');
+    g.appendChild(kr);
+    const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x', left + i*keyW + keyW/2);
+    t.setAttribute('y', ny+6);
+    t.setAttribute('text-anchor','middle');
+    t.setAttribute('class','keyText');
+    t.textContent = k;
+    g.appendChild(t);
+  });
+
+  // node id label
+  const idt = document.createElementNS('http://www.w3.org/2000/svg','text');
+  idt.setAttribute('x', nx);
+  idt.setAttribute('y', ny-28);
+  idt.setAttribute('text-anchor','middle');
+  idt.setAttribute('class','muted');
+  idt.style.fill = 'rgba(255,255,255,0.35)';
+  idt.style.fontSize = '11px';
+  idt.textContent = `id:${node.id}`;
+  g.appendChild(idt);
+
+  svg.appendChild(g);
+}
+
+function computeLayout(root) {
+  // simple top-down layout: compute widths recursively, place nodes
+  function dfs(node, depth=0) {
+    const children = node.children.map(ch=>dfs(ch,depth+1));
+    let width = Math.max(1,node.keys.length) * 48;
+    if(children.length>0) width = Math.max(width, children.reduce((s,c)=>s+c.width,0));
+    return {data:node, depth, width, children};
+  }
+  const treeRep = dfs(root,0);
+  // position
+  const levels = [];
+  function assign(n, x) {
+    const level = n.depth; if(!levels[level]) levels[level]=[];
+    n.cx = x + n.width/2;
+    n.cy = 40 + level*100;
+    levels[level].push(n);
+    // distribute children across width
+    let cur = x;
+    n.children.forEach(ch=>{ assign(ch, cur); cur += ch.width; });
+  }
+  assign(treeRep, 40);
+  // flatten
+  const flat = [];
+  function collect(n) { flat.push({data:n.data, cx:n.cx, cy:n.cy}); n.children.forEach(collect); }
+  collect(treeRep);
+  return flat;
+}
+
+// -------------------- UI & Controls --------------------
+const orderSelect = document.getElementById('orderSelect');
+const keyInput = document.getElementById('keyInput');
+const insertBtn = document.getElementById('insertBtn');
+const stepBtn = document.getElementById('stepBtn');
+const autoBtn = document.getElementById('autoBtn');
+const randBtn = document.getElementById('randBtn');
+const clearBtn = document.getElementById('clearBtn');
+const speedInp = document.getElementById('speed');
+
+orderSelect.addEventListener('change', ()=>{ tree = new BTree(parseInt(orderSelect.value)); render(); });
+insertBtn.addEventListener('click', ()=>{
+  const txt = keyInput.value.trim(); if(!txt) return;
+  const arr = txt.split(/[,\s]+/).map(x=>parseInt(x)).filter(x=>!Number.isNaN(x));
+  arr.forEach(k=> actionQueue.push({type:'insert',key:k}));
+  processQueueAuto();
+});
+
+stepBtn.addEventListener('click', ()=>{ processQueueStep(); });
+
+let autoRunning = false;
+autoBtn.addEventListener('click', ()=>{
+  autoRunning = !autoRunning; autoBtn.textContent = autoRunning? 'Stop Auto' : 'Auto Insert';
+  if(autoRunning) processQueueAuto();
+});
+
+randBtn.addEventListener('click', ()=>{
+  const r = Math.floor(Math.random()*90)+10; actionQueue.push({type:'insert',key:r}); processQueueAuto();
+});
+
+clearBtn.addEventListener('click', ()=>{ tree = new BTree(parseInt(orderSelect.value)); actionQueue = []; tree.log = []; render(); });
+speedInp.addEventListener('input', ()=>{ animSpeed = parseInt(speedInp.value); });
+
+function enqueueAndAnimateInsert(key) {
+  // perform insertion algorithm but split into actions
+  const res = tree.insert(key);
+  render();
+}
+
+async function processQueueAuto() {
+  if(actionQueue.length===0) return; // nothing
+  while(actionQueue.length>0 && autoRunning) {
+    const a = actionQueue.shift();
+    if(a.type==='insert') { enqueueAndAnimateInsert(a.key); await sleep(animSpeed); }
+  }
+}
+
+async function processQueueStep() {
+  if(actionQueue.length===0) { tree._addLog('No queued operations — ready.'); render(); return; }
+  const a = actionQueue.shift();
+  if(a.type==='insert') { enqueueAndAnimateInsert(a.key); render(); }
+}
+
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+// initial render
+render();
+
+// expose tree for debugging in console
+window._BTree = tree;
+
+</script>
+</body>
+</html>
+
